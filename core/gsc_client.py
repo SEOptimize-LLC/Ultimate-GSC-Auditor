@@ -212,7 +212,10 @@ class GSCClient:
                 results[url] = {"error": str(e)}
 
             if progress_callback:
-                progress_callback(i + 1, total)
+                progress_callback(
+                    i + 1, total,
+                    f"Inspecting URL {i + 1}/{total}",
+                )
 
             if i < total - 1:
                 time.sleep(delay_seconds)

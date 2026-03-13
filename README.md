@@ -50,43 +50,54 @@ Streamlit Cloud (7-page app)
 
 ## Setup
 
-### 1. Clone and install
+### 1. Clone and deploy
 
 ```bash
 git clone https://github.com/SEOptimize-LLC/Ultimate-GSC-Auditor.git
-cd Ultimate-GSC-Auditor
-pip install -r requirements.txt
 ```
 
-### 2. Configure secrets
+Deploy to [Streamlit Cloud](https://streamlit.io/cloud) by connecting your GitHub repo.
 
-Copy the template and fill in your credentials:
+### 2. Configure secrets (Streamlit Cloud)
 
-```bash
-cp secrets_template.toml .streamlit/secrets.toml
+All credentials are stored in the **Streamlit Cloud Secrets** tab — no local files or environment variables needed.
+
+1. Go to your app on [Streamlit Cloud](https://share.streamlit.io)
+2. Click **Settings** (gear icon) > **Secrets**
+3. Paste the following (fill in your values):
+
+```toml
+# Required — Google OAuth
+GOOGLE_CLIENT_ID = "your-client-id.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET = "your-client-secret"
+GOOGLE_REDIRECT_URI = "https://your-app.streamlit.app"
+
+# Optional — AI classification and insights
+OPENROUTER_API_KEY = "sk-or-v1-your-key"
+
+# Optional — Historical data persistence
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_ANON_KEY = "your-anon-key"
 ```
 
-Required secrets:
-
-- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — Google OAuth credentials ([Console](https://console.cloud.google.com/apis/credentials))
-- `GOOGLE_REDIRECT_URI` — OAuth redirect (default: `http://localhost:8501`)
-
-Optional:
-
-- `OPENROUTER_API_KEY` — For AI classification and insights ([OpenRouter](https://openrouter.ai/keys))
-- `SUPABASE_URL` / `SUPABASE_ANON_KEY` — For historical data persistence ([Supabase](https://supabase.com))
+See [secrets_template.toml](secrets_template.toml) for the full template.
 
 ### 3. Google OAuth setup
 
 1. Create a project in [Google Cloud Console](https://console.cloud.google.com)
 2. Enable the **Google Search Console API**
 3. Create OAuth 2.0 credentials (Web application type)
-4. Add `http://localhost:8501` as an authorized redirect URI
-5. Copy the client ID and secret to your secrets file
+4. Add your Streamlit Cloud URL (e.g., `https://your-app.streamlit.app`) as an authorized redirect URI
+5. Copy the client ID and secret into the Streamlit Cloud Secrets tab
 
-### 4. Run
+### 4. Local development (optional)
+
+If running locally instead of Streamlit Cloud:
 
 ```bash
+pip install -r requirements.txt
+cp secrets_template.toml .streamlit/secrets.toml
+# Edit .streamlit/secrets.toml with your credentials
 streamlit run app.py
 ```
 

@@ -2,12 +2,13 @@
 
 import logging
 import time
+import urllib.parse
 from typing import Any, Optional
 
 import pandas as pd
+import requests as http_requests
 import streamlit as st
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 logger = logging.getLogger(__name__)
@@ -17,52 +18,55 @@ API_SERVICE_NAME = "searchconsole"
 API_VERSION = "v1"
 MAX_ROWS_PER_REQUEST = 25_000
 
+_GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+_GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
 
-def create_oauth_flow() -> Flow:
-    """Create a Google OAuth 2.0 flow for GSC authentication."""
-    redirect_uri = st.secrets.get(
+
+def _get_redirect_uri() -> str:
+    return st.secrets.get(
         "GOOGLE_REDIRECT_URI", "http://localhost:8501"
     )
-    client_config = {
-        "web": {
-            "client_id": st.secrets["GOOGLE_CLIENT_ID"],
-            "client_secret": st.secrets["GOOGLE_CLIENT_SECRET"],
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [redirect_uri],
-        }
-    }
-    flow = Flow.from_client_config(
-        client_config,
-        scopes=SCOPES,
-        redirect_uri=redirect_uri,
-    )
-    return flow
 
 
 def get_authorization_url() -> str:
-    """Generate the Google OAuth authorization URL."""
-    flow = create_oauth_flow()
-    # Disable PKCE — not needed for confidential clients (we have
-    # a client_secret) and the code_verifier can't survive
-    # Streamlit's cross-domain OAuth redirect.
-    flow.code_verifier = None
-    auth_url, state = flow.authorization_url(
-        access_type="offline",
-        prompt="consent",
-    )
-    st.session_state["oauth_state"] = state
-    return auth_url
+    """Build Google OAuth authorization URL manually (no PKCE)."""
+    params = {
+        "client_id": st.secrets["GOOGLE_CLIENT_ID"],
+        "redirect_uri": _get_redirect_uri(),
+        "response_type": "code",
+        "scope": " ".join(SCOPES),
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    return f"{_GOOGLE_AUTH_URI}?{urllib.parse.urlencode(params)}"
 
 
 def handle_oauth_callback(auth_code: str) -> Credentials:
-    """Exchange the authorization code for credentials."""
-    import os
-    os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
-    flow = create_oauth_flow()
-    flow.code_verifier = None
-    flow.fetch_token(code=auth_code)
-    return flow.credentials
+    """Exchange the authorization code for credentials via direct HTTP."""
+    resp = http_requests.post(
+        _GOOGLE_TOKEN_URI,
+        data={
+            "client_id": st.secrets["GOOGLE_CLIENT_ID"],
+            "client_secret": st.secrets["GOOGLE_CLIENT_SECRET"],
+            "code": auth_code,
+            "grant_type": "authorization_code",
+            "redirect_uri": _get_redirect_uri(),
+        },
+    )
+    token_data = resp.json()
+    if "error" in token_data:
+        raise Exception(
+            f"({token_data['error']}) "
+            f"{token_data.get('error_description', '')}"
+        )
+    return Credentials(
+        token=token_data["access_token"],
+        refresh_token=token_data.get("refresh_token"),
+        token_uri=_GOOGLE_TOKEN_URI,
+        client_id=st.secrets["GOOGLE_CLIENT_ID"],
+        client_secret=st.secrets["GOOGLE_CLIENT_SECRET"],
+        scopes=SCOPES,
+    )
 
 
 class GSCClient:

@@ -366,8 +366,14 @@ def render():
         disabled=already_running,
     ):
         st.session_state["audit_running"] = True
-        _run_audit_pipeline(metric_ids, days)
-        st.balloons()
+        try:
+            _run_audit_pipeline(metric_ids, days)
+            st.balloons()
+            st.switch_page("pages/3_Dashboard.py")
+        except Exception as e:
+            st.session_state["audit_running"] = False
+            st.error(f"Audit failed: {e}")
+            logger.exception("Audit pipeline error")
 
     # Show previous result summary if exists
     audit = st.session_state.get("audit_result")
@@ -376,6 +382,11 @@ def render():
             f"Last audit: **{audit.health_grade}** "
             f"({audit.health_score}/100) — "
             f"{audit.total_findings} findings"
+        )
+        st.page_link(
+            "pages/3_Dashboard.py",
+            label="View Dashboard",
+            icon="📊",
         )
 
 

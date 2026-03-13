@@ -73,6 +73,56 @@ class SupabaseClient:
             logger.error(f"Upsert property failed: {e}")
             return None
 
+    def set_background_monitoring(
+        self,
+        property_url: str,
+        enabled: bool,
+        refresh_token: Optional[str] = None,
+    ) -> bool:
+        """Enable or disable background monitoring for a property."""
+        if not self.is_configured:
+            return False
+        try:
+            data = {
+                "property_url": property_url,
+                "background_collection_enabled": enabled,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            if refresh_token is not None:
+                data["refresh_token"] = refresh_token
+            elif not enabled:
+                data["refresh_token"] = None
+
+            (
+                self.client.table("properties")
+                .upsert(data, on_conflict="property_url")
+                .execute()
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"Set background monitoring failed: {e}"
+            )
+            return False
+
+    def get_property(
+        self, property_url: str
+    ) -> Optional[dict]:
+        """Get a property record."""
+        if not self.is_configured:
+            return None
+        try:
+            result = (
+                self.client.table("properties")
+                .select("*")
+                .eq("property_url", property_url)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Get property failed: {e}")
+            return None
+
     # --- Audit Runs ---
 
     def save_audit_run(self, audit) -> Optional[str]:

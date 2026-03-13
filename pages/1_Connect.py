@@ -107,6 +107,76 @@ This tool computes **100+ custom SEO metrics** from your Google Search Console d
 
     st.markdown("---")
 
+    # Background Monitoring
+    st.subheader("Background Monitoring")
+    st.markdown(
+        "Enable daily/weekly background data collection for this "
+        "property via n8n. This stores your OAuth refresh token in "
+        "Supabase so n8n can authenticate on your behalf."
+    )
+
+    from core.supabase_client import SupabaseClient
+    supa = SupabaseClient()
+
+    # Load current monitoring state from Supabase
+    monitoring_key = f"monitoring_{selected}"
+    if monitoring_key not in st.session_state:
+        prop_record = supa.get_property(selected)
+        st.session_state[monitoring_key] = (
+            prop_record.get("background_collection_enabled", False)
+            if prop_record
+            else False
+        )
+
+    if supa.is_configured:
+        monitoring_enabled = st.toggle(
+            "Enable Background Monitoring",
+            value=st.session_state.get(monitoring_key, False),
+            help=(
+                "When enabled, n8n will collect GSC data daily "
+                "and run URL inspections weekly for this property."
+            ),
+        )
+
+        if monitoring_enabled != st.session_state.get(
+            monitoring_key, False
+        ):
+            credentials = st.session_state.get("credentials")
+            refresh_token = (
+                credentials.refresh_token
+                if credentials and monitoring_enabled
+                else None
+            )
+            success = supa.set_background_monitoring(
+                property_url=selected,
+                enabled=monitoring_enabled,
+                refresh_token=refresh_token,
+            )
+            if success:
+                st.session_state[monitoring_key] = (
+                    monitoring_enabled
+                )
+                if monitoring_enabled:
+                    st.success(
+                        "Background monitoring enabled. "
+                        "n8n will collect data automatically."
+                    )
+                else:
+                    st.info(
+                        "Background monitoring disabled. "
+                        "Refresh token removed."
+                    )
+            else:
+                st.error("Failed to update monitoring settings.")
+    else:
+        st.info(
+            "Supabase not configured. Add SUPABASE_URL and "
+            "SUPABASE_ANON_KEY to your secrets to enable "
+            "background monitoring."
+        )
+
+    st.markdown("---")
+
     # Connection status summary
     st.subheader("Connection Status")
     col1, col2, col3 = st.columns(3)
@@ -115,18 +185,34 @@ This tool computes **100+ custom SEO metrics** from your Google Search Console d
     with col2:
         st.metric("Properties Available", len(properties))
     with col3:
-        st.metric("Selected Property", selected.split("//")[-1].rstrip("/"))
+        st.metric(
+            "Selected Property",
+            selected.split("//")[-1].rstrip("/"),
+        )
 
-    st.info("Head to the **Configure** page to set up your audit parameters.")
+    st.info(
+        "Head to the **Configure** page to set up "
+        "your audit parameters."
+    )
 
     # Disconnect option
     with st.expander("Account Options"):
-        if st.button("Disconnect Google Account", type="secondary"):
-            for key in ["authenticated", "credentials", "gsc_client", "properties",
-                       "selected_property", "data_store", "audit_result"]:
-                st.session_state[key] = None if key != "authenticated" else False
-                if key == "properties":
+        if st.button(
+            "Disconnect Google Account", type="secondary"
+        ):
+            keys_to_clear = [
+                "authenticated", "credentials",
+                "gsc_client", "properties",
+                "selected_property", "data_store",
+                "audit_result",
+            ]
+            for key in keys_to_clear:
+                if key == "authenticated":
+                    st.session_state[key] = False
+                elif key == "properties":
                     st.session_state[key] = []
+                else:
+                    st.session_state[key] = None
             st.rerun()
 
 

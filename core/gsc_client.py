@@ -43,15 +43,15 @@ def create_oauth_flow() -> Flow:
 def get_authorization_url() -> str:
     """Generate the Google OAuth authorization URL."""
     flow = create_oauth_flow()
+    # Disable PKCE — not needed for confidential clients (we have
+    # a client_secret) and the code_verifier can't survive
+    # Streamlit's cross-domain OAuth redirect.
+    flow.code_verifier = None
     auth_url, state = flow.authorization_url(
         access_type="offline",
         prompt="consent",
     )
     st.session_state["oauth_state"] = state
-    # Store code verifier for PKCE (required by Google)
-    st.session_state["oauth_code_verifier"] = (
-        flow.code_verifier
-    )
     return auth_url
 
 
@@ -60,10 +60,7 @@ def handle_oauth_callback(auth_code: str) -> Credentials:
     import os
     os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
     flow = create_oauth_flow()
-    # Restore PKCE code verifier from session state
-    flow.code_verifier = st.session_state.get(
-        "oauth_code_verifier"
-    )
+    flow.code_verifier = None
     flow.fetch_token(code=auth_code)
     return flow.credentials
 

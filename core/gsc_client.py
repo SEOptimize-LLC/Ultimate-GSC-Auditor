@@ -48,6 +48,10 @@ def get_authorization_url() -> str:
         prompt="consent",
     )
     st.session_state["oauth_state"] = state
+    # Store code verifier for PKCE (required by Google)
+    st.session_state["oauth_code_verifier"] = (
+        flow.code_verifier
+    )
     return auth_url
 
 
@@ -56,6 +60,10 @@ def handle_oauth_callback(auth_code: str) -> Credentials:
     import os
     os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
     flow = create_oauth_flow()
+    # Restore PKCE code verifier from session state
+    flow.code_verifier = st.session_state.get(
+        "oauth_code_verifier"
+    )
     flow.fetch_token(code=auth_code)
     return flow.credentials
 

@@ -31,7 +31,8 @@ SHAPES: dict[str, DataShape] = {
     "SA_08": DataShape("query_country_90d", ("query", "country"), 90, "web", "Query by country (90d)"),
     "SA_09": DataShape("page_country_90d", ("page", "country"), 90, "web", "Page by country (90d)"),
     "SA_10": DataShape("search_appearance_90d", ("searchAppearance",), 90, "web", "SERP feature metrics (90d)"),
-    "SA_11": DataShape("search_appearance_page_90d", ("searchAppearance", "page"), 90, "web", "SERP features by page (90d)"),
+    # SA_11 removed — GSC API does not allow searchAppearance
+    # combined with other dimensions.
 
     # 365-day shapes
     "SA_12": DataShape("page_date_365d", ("page", "date"), 365, "web", "Page daily trends (365d)"),
@@ -85,8 +86,8 @@ METRIC_SHAPES: dict[int, list[str]] = {
     # Impression & Visibility (22-27)
     22: ["SA_05", "SA_18"],  # Impression Growth Rate MoM
     23: ["SA_05", "SA_12"],  # Impression Growth Rate YoY
-    24: ["SA_10", "SA_11"],  # SERP Feature Impression Share
-    25: ["SA_10", "SA_11"],  # Featured Snippet Impression Rate
+    24: ["SA_10"],  # SERP Feature Impression Share
+    25: ["SA_10"],  # Featured Snippet Impression Rate
     26: ["SA_03"],  # Share of Voice by Topic Cluster (needs AI)
     27: ["SA_03"],  # Query Impression Depth
 
@@ -149,7 +150,7 @@ METRIC_SHAPES: dict[int, list[str]] = {
     71: ["SA_01"],  # Deep-Page Impression Rate (pos 51+)
     72: ["SA_05", "SA_18"],  # Impression-to-Click Funnel Loss Rate
     73: ["SA_04", "SA_17"],  # New vs Returning Query Impression Split
-    74: ["SA_10", "SA_11"],  # Rich Result Impression Rate
+    74: ["SA_10"],  # Rich Result Impression Rate
     75: ["SA_23"],  # Video Result Impression Share
     76: ["SA_22"],  # Image Result Impression Share
     77: ["SA_20", "SA_21"],  # News/Discover Impression Share

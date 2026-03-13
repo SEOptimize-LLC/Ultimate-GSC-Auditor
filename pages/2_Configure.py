@@ -80,8 +80,14 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
     """Execute the audit pipeline: fetch -> compute -> store."""
     progress_bar = st.progress(0.0)
     status_text = st.empty()
+    debug_log = st.expander("Audit Log", expanded=True)
+
+    def _log(msg: str):
+        """Write a line to the visible audit log."""
+        debug_log.write(msg)
 
     # Phase 1: Fetch data
+    _log("**Phase 1/5:** Fetching GSC data...")
     status_text.text("Fetching GSC data...")
     store = DataStore()
     st.session_state["data_store"] = store
@@ -91,12 +97,13 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
 
     url_filter_config = _build_url_filter_config()
     st.session_state["url_filter_config"] = url_filter_config
-    url_filter = URLFilter(url_filter_config)
 
-    fetcher = DataFetcher(client=client, store=store, site_url=site_url)
+    fetcher = DataFetcher(
+        client=client, store=store, site_url=site_url,
+    )
 
     required_shapes = get_required_shapes(metric_ids)
-    total_steps = len(required_shapes) + 2  # +1 compute, +1 finalize
+    total_steps = len(required_shapes) + 2
 
     def on_fetch_progress(current, total, msg):
         pct = current / total_steps
@@ -109,8 +116,18 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
         url_filter=url_filter_config,
     )
 
-    # Phase 2: AI pre-processing (if enabled)
-    # Load cached classifications from Supabase
+    shapes_fetched = store.fetched_shapes
+    _log(
+        f"Fetched **{len(shapes_fetched)}** data shapes. "
+        f"Memory: {store.memory_usage_mb:.1f} MB"
+    )
+    for shape_name in shapes_fetched:
+        df = store.get_df(shape_name)
+        if hasattr(df, "__len__"):
+            _log(f"  - `{shape_name}`: {len(df):,} rows")
+
+    # Phase 2: AI pre-processing
+    _log("**Phase 2/5:** AI pre-processing...")
     ai_classifications = st.session_state.get(
         "ai_classifications", {}
     )
@@ -126,19 +143,18 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
                     st.session_state[
                         "ai_classifications"
                     ] = ai_classifications
-                    status_text.text(
+                    _log(
                         f"Loaded {len(ai_classifications)} "
-                        f"cached classifications"
+                        f"cached AI classifications"
                     )
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"Supabase classification load skipped: {e}")
 
     ai_enabled = st.session_state.get("ai_enabled", True)
 
     if ai_enabled:
         status_text.text("Running AI classifications...")
         progress_bar.progress(0.82)
-
         try:
             from ai.openrouter_client import OpenRouterClient
             from ai.preprocessor import AIPreprocessor
@@ -158,10 +174,22 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
                 st.session_state[
                     "ai_classifications"
                 ] = ai_classifications
+                _log(
+                    "AI classified "
+                    f"{len(ai_classifications)} queries"
+                )
+            else:
+                _log(
+                    "OpenRouter not configured — "
+                    "AI classification skipped"
+                )
         except Exception as e:
-            status_text.text(f"AI pre-processing skipped: {e}")
+            _log(f"AI pre-processing error: {e}")
+    else:
+        _log("AI analysis disabled by user")
 
     # Phase 3: Compute metrics
+    _log("**Phase 3/5:** Computing metrics...")
     status_text.text("Computing metrics...")
     progress_bar.progress(0.88)
 
@@ -174,7 +202,21 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
         ai_classifications=ai_classifications,
     )
 
+    _log(f"Computed **{len(results)}** metric results")
+    if results:
+        from collections import Counter
+        sev_counts = Counter(r.severity.value for r in results)
+        _log(
+            f"  Severities: "
+            + ", ".join(
+                f"{s}={c}" for s, c in sev_counts.items()
+            )
+        )
+    else:
+        _log("**WARNING: No metric results produced!**")
+
     # Phase 4: Build audit result
+    _log("**Phase 4/5:** Building audit report...")
     status_text.text("Building audit report...")
     progress_bar.progress(0.95)
 
@@ -190,7 +232,14 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
     st.session_state["audit_result"] = audit
     st.session_state["audit_running"] = False
 
-    # Phase 5: Save to Supabase (non-blocking)
+    _log(
+        f"Health Score: **{audit.health_score}/100** "
+        f"(Grade: **{audit.health_grade}**) — "
+        f"{audit.total_findings} findings"
+    )
+
+    # Phase 5: Save to Supabase
+    _log("**Phase 5/5:** Saving to Supabase...")
     try:
         from core.supabase_client import SupabaseClient
 
@@ -202,13 +251,18 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
                 st.session_state[
                     "current_audit_run_id"
                 ] = run_id
-            # Cache AI classifications
+                _log(f"Saved audit run: `{run_id}`")
+            else:
+                _log("Supabase save returned no run ID")
             if ai_classifications:
                 sb.save_classifications(
                     site_url, ai_classifications
                 )
+                _log("Saved AI classifications to cache")
+        else:
+            _log("Supabase not configured — skipping save")
     except Exception as e:
-        logger.warning(f"Supabase save skipped: {e}")
+        _log(f"Supabase save error: {e}")
 
     progress_bar.progress(1.0)
     status_text.text(

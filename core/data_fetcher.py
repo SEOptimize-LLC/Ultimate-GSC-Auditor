@@ -182,11 +182,9 @@ class DataFetcher:
         else:
             urls_to_inspect = all_urls
 
-        # Cap at 50 for on-demand audits (each URL Inspection API
-        # call takes ~4 sec, so 50 ≈ 3-4 min vs 287 ≈ 20 min).
-        # The n8n weekly job handles the full 2,000/property batch.
-        max_inspect = 50
-        if len(urls_to_inspect) > max_inspect:
+        # Cap at 2,000 (daily API limit per property).
+        # Prioritize by impressions.
+        if len(urls_to_inspect) > 2000:
             url_impressions = (
                 page_df[page_df["page"].isin(urls_to_inspect)]
                 .groupby("page")["impressions"]
@@ -194,7 +192,7 @@ class DataFetcher:
                 .sort_values(ascending=False)
             )
             urls_to_inspect = (
-                url_impressions.head(max_inspect).index.tolist()
+                url_impressions.head(2000).index.tolist()
             )
 
         logger.info(

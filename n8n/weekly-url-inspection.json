@@ -1,0 +1,87 @@
+{
+  "name": "GSC Auditor - Weekly URL Inspection",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 4 * * 0"}]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [250, 300],
+      "typeVersion": 1.2
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT property_url, refresh_token FROM properties WHERE background_collection_enabled = true AND refresh_token IS NOT NULL"
+      },
+      "name": "Get Active Properties",
+      "type": "n8n-nodes-base.supabase",
+      "position": [450, 300],
+      "typeVersion": 2,
+      "credentials": {"supabaseApi": {"id": "SUPABASE_CREDENTIAL_ID", "name": "Supabase"}}
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "Loop Properties",
+      "type": "n8n-nodes-base.splitInBatches",
+      "position": [650, 300],
+      "typeVersion": 3
+    },
+    {
+      "parameters": {
+        "url": "https://oauth2.googleapis.com/token",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "client_id", "value": "={{$env.GOOGLE_CLIENT_ID}}"},
+            {"name": "client_secret", "value": "={{$env.GOOGLE_CLIENT_SECRET}}"},
+            {"name": "refresh_token", "value": "={{$json.refresh_token}}"},
+            {"name": "grant_type", "value": "refresh_token"}
+          ]
+        }
+      },
+      "name": "Refresh OAuth Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [850, 300],
+      "typeVersion": 4.2
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get top URLs by impressions and inspect them\nconst accessToken = $input.first().json.access_token;\nconst propertyUrl = $('Loop Properties').first().json.property_url;\n\n// 1. Get top URLs by impressions (last 90d)\nconst endDate = new Date();\nendDate.setDate(endDate.getDate() - 3);\nconst startDate = new Date(endDate);\nstartDate.setDate(startDate.getDate() - 90);\n\nconst searchResponse = await this.helpers.httpRequest({\n  method: 'POST',\n  url: `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/searchAnalytics/query`,\n  headers: {'Authorization': `Bearer ${accessToken}`},\n  body: {\n    startDate: startDate.toISOString().split('T')[0],\n    endDate: endDate.toISOString().split('T')[0],\n    dimensions: ['page'],\n    rowLimit: 2000,\n  },\n});\n\nconst urls = (searchResponse.rows || [])\n  .sort((a, b) => b.impressions - a.impressions)\n  .slice(0, 2000)\n  .map(r => r.keys[0]);\n\n// 2. Inspect each URL (with rate limiting)\nconst results = [];\nfor (let i = 0; i < urls.length; i++) {\n  try {\n    const inspectResponse = await this.helpers.httpRequest({\n      method: 'POST',\n      url: `https://searchconsole.googleapis.com/v1/urlInspection/index:inspect`,\n      headers: {'Authorization': `Bearer ${accessToken}`},\n      body: {\n        inspectionUrl: urls[i],\n        siteUrl: propertyUrl,\n      },\n    });\n    results.push({\n      property_url: propertyUrl,\n      url: urls[i],\n      inspection_result: inspectResponse,\n    });\n  } catch (e) {\n    // Skip failed inspections\n  }\n  // Rate limit: ~2 req/sec\n  if (i % 2 === 1) await new Promise(r => setTimeout(r, 1000));\n}\n\nreturn results.map(r => ({json: r}));"
+      },
+      "name": "Inspect URLs",
+      "type": "n8n-nodes-base.code",
+      "position": [1050, 300],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "tableId": "url_inspection_results",
+        "conflictColumns": "property_url,url",
+        "dataToSend": "autoMapInputData"
+      },
+      "name": "Store Results",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1250, 300],
+      "typeVersion": 2,
+      "credentials": {"supabaseApi": {"id": "SUPABASE_CREDENTIAL_ID", "name": "Supabase"}}
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {"main": [[{"node": "Get Active Properties", "type": "main", "index": 0}]]},
+    "Get Active Properties": {"main": [[{"node": "Loop Properties", "type": "main", "index": 0}]]},
+    "Loop Properties": {"main": [[{"node": "Refresh OAuth Token", "type": "main", "index": 0}]]},
+    "Refresh OAuth Token": {"main": [[{"node": "Inspect URLs", "type": "main", "index": 0}]]},
+    "Inspect URLs": {"main": [[{"node": "Store Results", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}

@@ -1,0 +1,86 @@
+{
+  "name": "GSC Auditor - Daily Data Collection",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 6 * * *"}]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [250, 300],
+      "typeVersion": 1.2
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT property_url, refresh_token FROM properties WHERE background_collection_enabled = true AND refresh_token IS NOT NULL"
+      },
+      "name": "Get Active Properties",
+      "type": "n8n-nodes-base.supabase",
+      "position": [450, 300],
+      "typeVersion": 2,
+      "credentials": {"supabaseApi": {"id": "SUPABASE_CREDENTIAL_ID", "name": "Supabase"}}
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "Loop Properties",
+      "type": "n8n-nodes-base.splitInBatches",
+      "position": [650, 300],
+      "typeVersion": 3
+    },
+    {
+      "parameters": {
+        "url": "https://oauth2.googleapis.com/token",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "client_id", "value": "={{$env.GOOGLE_CLIENT_ID}}"},
+            {"name": "client_secret", "value": "={{$env.GOOGLE_CLIENT_SECRET}}"},
+            {"name": "refresh_token", "value": "={{$json.refresh_token}}"},
+            {"name": "grant_type", "value": "refresh_token"}
+          ]
+        }
+      },
+      "name": "Refresh OAuth Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [850, 300],
+      "typeVersion": 4.2
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fetch yesterday's GSC data for each shape\nconst accessToken = $input.first().json.access_token;\nconst propertyUrl = $('Loop Properties').first().json.property_url;\n\nconst yesterday = new Date();\nyesterday.setDate(yesterday.getDate() - 1);\nconst dateStr = yesterday.toISOString().split('T')[0];\n\nconst shapes = [\n  {name: 'query_daily', dimensions: ['query', 'date']},\n  {name: 'page_daily', dimensions: ['page', 'date']},\n];\n\nconst results = [];\nfor (const shape of shapes) {\n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/searchAnalytics/query`,\n    headers: {'Authorization': `Bearer ${accessToken}`},\n    body: {\n      startDate: dateStr,\n      endDate: dateStr,\n      dimensions: shape.dimensions,\n      rowLimit: 25000,\n    },\n  });\n  const rows = response.rows || [];\n  for (const row of rows) {\n    results.push({\n      property_url: propertyUrl,\n      shape_name: shape.name,\n      data: row,\n    });\n  }\n}\n\nreturn results.map(r => ({json: r}));"
+      },
+      "name": "Fetch GSC Data",
+      "type": "n8n-nodes-base.code",
+      "position": [1050, 300],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "tableId": "gsc_raw_data",
+        "dataToSend": "autoMapInputData"
+      },
+      "name": "Store in Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "position": [1250, 300],
+      "typeVersion": 2,
+      "credentials": {"supabaseApi": {"id": "SUPABASE_CREDENTIAL_ID", "name": "Supabase"}}
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {"main": [[{"node": "Get Active Properties", "type": "main", "index": 0}]]},
+    "Get Active Properties": {"main": [[{"node": "Loop Properties", "type": "main", "index": 0}]]},
+    "Loop Properties": {"main": [[{"node": "Refresh OAuth Token", "type": "main", "index": 0}]]},
+    "Refresh OAuth Token": {"main": [[{"node": "Fetch GSC Data", "type": "main", "index": 0}]]},
+    "Fetch GSC Data": {"main": [[{"node": "Store in Supabase", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}

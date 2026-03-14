@@ -64,6 +64,7 @@ This tool computes **100+ custom SEO metrics** from your Google Search Console d
         return
 
     property_options = [p["url"] for p in properties]
+    previous_property = st.session_state.get("selected_property")
     selected = st.selectbox(
         "GSC Property:",
         options=property_options,
@@ -71,6 +72,14 @@ This tool computes **100+ custom SEO metrics** from your Google Search Console d
         help="Select the website you want to audit.",
     )
     st.session_state["selected_property"] = selected
+
+    # Clear stale audit state when property changes
+    if previous_property and previous_property != selected:
+        st.session_state["audit_result"] = None
+        st.session_state["audit_running"] = False
+        st.session_state["data_store"] = None
+        st.session_state["ai_classifications"] = {}
+        st.session_state["current_audit_run_id"] = None
 
     # Property info
     selected_info = next(

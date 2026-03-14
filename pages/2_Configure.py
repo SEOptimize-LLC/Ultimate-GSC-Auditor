@@ -230,7 +230,6 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
     audit.add_results(results)
 
     st.session_state["audit_result"] = audit
-    st.session_state["audit_running"] = False
 
     _log(
         f"Health Score: **{audit.health_score}/100** "
@@ -411,27 +410,32 @@ def render():
     # --- Run Button ---
     st.markdown("---")
 
-    already_running = st.session_state.get("audit_running", False)
+    # Always reset audit_running when the page loads —
+    # Streamlit scripts are synchronous per page, so if we're
+    # here rendering the page, no audit is currently running.
+    st.session_state["audit_running"] = False
 
     if st.button(
         "Run Audit",
         type="primary",
         use_container_width=True,
-        disabled=already_running,
     ):
-        st.session_state["audit_running"] = True
+        audit_success = False
         try:
             _run_audit_pipeline(metric_ids, days)
-            st.balloons()
-            st.switch_page("pages/3_Dashboard.py")
+            audit_success = True
         except Exception as e:
-            st.session_state["audit_running"] = False
             st.error(f"Audit failed: {e}")
             logger.exception("Audit pipeline error")
 
+        # Navigate OUTSIDE try/except — st.switch_page raises
+        # an internal Streamlit exception that must not be caught.
+        if audit_success:
+            st.switch_page("pages/3_Dashboard.py")
+
     # Show previous result summary if exists
     audit = st.session_state.get("audit_result")
-    if audit and not already_running:
+    if audit:
         st.success(
             f"Last audit: **{audit.health_grade}** "
             f"({audit.health_score}/100) — "

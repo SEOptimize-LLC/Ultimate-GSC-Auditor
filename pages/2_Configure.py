@@ -420,24 +420,17 @@ def render():
         type="primary",
         use_container_width=True,
     ):
-        audit_success = False
         try:
             _run_audit_pipeline(metric_ids, days)
-            audit_success = True
         except Exception as e:
             st.error(f"Audit failed: {e}")
             logger.exception("Audit pipeline error")
 
-        # Navigate OUTSIDE try/except — st.switch_page raises
-        # an internal Streamlit exception that must not be caught.
-        if audit_success:
-            st.switch_page("pages/3_Dashboard.py")
-
-    # Show previous result summary if exists
+    # Show result summary if audit exists
     audit = st.session_state.get("audit_result")
     if audit:
         st.success(
-            f"Last audit: **{audit.health_grade}** "
+            f"Audit complete! Grade: **{audit.health_grade}** "
             f"({audit.health_score}/100) — "
             f"{audit.total_findings} findings"
         )
@@ -445,6 +438,11 @@ def render():
             "pages/3_Dashboard.py",
             label="View Dashboard",
             icon="📊",
+        )
+        st.page_link(
+            "pages/4_Metrics_Explorer.py",
+            label="Explore Metrics",
+            icon="🔍",
         )
 
 

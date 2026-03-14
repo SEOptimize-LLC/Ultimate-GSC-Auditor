@@ -77,62 +77,82 @@ def _get_selected_metric_ids() -> list[int]:
 
 
 def _run_audit_pipeline(metric_ids: list[int], days: int):
-    """Execute the audit pipeline: fetch -> compute -> store."""
+    """Execute the audit pipeline: fetch -> compute -> store.
+
+    Each phase is independently wrapped so a failure in one
+    phase does not prevent later phases from running. The
+    audit_result is saved to session state as early as possible
+    so even a partial run produces viewable results.
+    """
     progress_bar = st.progress(0.0)
     status_text = st.empty()
+    result_container = st.container()
     debug_log = st.expander("Audit Log", expanded=True)
+    errors: list[str] = []
 
     def _log(msg: str):
-        """Write a line to the visible audit log."""
         debug_log.write(msg)
-
-    # Phase 1: Fetch data
-    _log("**Phase 1/5:** Fetching GSC data...")
-    status_text.text("Fetching GSC data...")
-    store = DataStore()
-    st.session_state["data_store"] = store
 
     client = st.session_state["gsc_client"]
     site_url = st.session_state["selected_property"]
+    start_date, end_date = get_date_range(days)
+
+    # ----------------------------------------------------------
+    # Phase 1: Fetch data
+    # ----------------------------------------------------------
+    _log("**Phase 1/5:** Fetching GSC data...")
+    status_text.text("Phase 1/5: Fetching GSC data...")
+    store = DataStore()
+    st.session_state["data_store"] = store
 
     url_filter_config = _build_url_filter_config()
     st.session_state["url_filter_config"] = url_filter_config
 
-    fetcher = DataFetcher(
-        client=client, store=store, site_url=site_url,
-    )
+    try:
+        fetcher = DataFetcher(
+            client=client, store=store, site_url=site_url,
+        )
+        required_shapes = get_required_shapes(metric_ids)
+        total_steps = len(required_shapes) + 2
 
-    required_shapes = get_required_shapes(metric_ids)
-    total_steps = len(required_shapes) + 2
+        def on_fetch_progress(current, total, msg):
+            pct = current / total_steps
+            progress_bar.progress(min(pct, 0.8))
+            status_text.text(f"Phase 1/5: {msg}")
 
-    def on_fetch_progress(current, total, msg):
-        pct = current / total_steps
-        progress_bar.progress(min(pct, 0.8))
-        status_text.text(msg)
+        fetcher.fetch_for_metrics(
+            metric_ids=metric_ids,
+            progress_callback=on_fetch_progress,
+            url_filter=url_filter_config,
+        )
 
-    fetcher.fetch_for_metrics(
-        metric_ids=metric_ids,
-        progress_callback=on_fetch_progress,
-        url_filter=url_filter_config,
-    )
+        shapes_fetched = store.fetched_shapes
+        _log(
+            f"Fetched **{len(shapes_fetched)}** shapes. "
+            f"Memory: {store.memory_usage_mb:.1f} MB"
+        )
+        for shape_name in shapes_fetched:
+            df = store.get_df(shape_name)
+            if hasattr(df, "__len__"):
+                _log(f"  - `{shape_name}`: {len(df):,} rows")
+    except Exception as e:
+        msg = f"Phase 1 FAILED: {e}"
+        _log(f"**ERROR** — {msg}")
+        errors.append(msg)
+        logger.exception(msg)
 
-    shapes_fetched = store.fetched_shapes
-    _log(
-        f"Fetched **{len(shapes_fetched)}** data shapes. "
-        f"Memory: {store.memory_usage_mb:.1f} MB"
-    )
-    for shape_name in shapes_fetched:
-        df = store.get_df(shape_name)
-        if hasattr(df, "__len__"):
-            _log(f"  - `{shape_name}`: {len(df):,} rows")
-
+    # ----------------------------------------------------------
     # Phase 2: AI pre-processing
+    # ----------------------------------------------------------
     _log("**Phase 2/5:** AI pre-processing...")
+    status_text.text("Phase 2/5: AI pre-processing...")
+    progress_bar.progress(0.82)
     ai_classifications = st.session_state.get(
         "ai_classifications", {}
     )
-    if not ai_classifications:
-        try:
+
+    try:
+        if not ai_classifications:
             from core.supabase_client import SupabaseClient
             sb = SupabaseClient()
             if sb.is_configured:
@@ -145,17 +165,11 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
                     ] = ai_classifications
                     _log(
                         f"Loaded {len(ai_classifications)} "
-                        f"cached AI classifications"
+                        f"cached classifications"
                     )
-        except Exception as e:
-            _log(f"Supabase classification load skipped: {e}")
 
-    ai_enabled = st.session_state.get("ai_enabled", True)
-
-    if ai_enabled:
-        status_text.text("Running AI classifications...")
-        progress_bar.progress(0.82)
-        try:
+        ai_enabled = st.session_state.get("ai_enabled", True)
+        if ai_enabled:
             from ai.openrouter_client import OpenRouterClient
             from ai.preprocessor import AIPreprocessor
 
@@ -175,52 +189,59 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
                     "ai_classifications"
                 ] = ai_classifications
                 _log(
-                    "AI classified "
+                    f"AI classified "
                     f"{len(ai_classifications)} queries"
                 )
             else:
-                _log(
-                    "OpenRouter not configured — "
-                    "AI classification skipped"
-                )
-        except Exception as e:
-            _log(f"AI pre-processing error: {e}")
-    else:
-        _log("AI analysis disabled by user")
+                _log("OpenRouter not configured — skipped")
+        else:
+            _log("AI disabled by user")
+    except Exception as e:
+        msg = f"Phase 2 error (non-fatal): {e}"
+        _log(msg)
+        logger.warning(msg)
 
+    # ----------------------------------------------------------
     # Phase 3: Compute metrics
+    # ----------------------------------------------------------
     _log("**Phase 3/5:** Computing metrics...")
-    status_text.text("Computing metrics...")
+    status_text.text("Phase 3/5: Computing metrics...")
     progress_bar.progress(0.88)
+    results = []
 
-    from metrics import run_all_metrics
+    try:
+        from metrics import run_all_metrics
 
-    results = run_all_metrics(
-        metric_ids=metric_ids,
-        store=store,
-        brand_name=st.session_state.get("brand_name", ""),
-        ai_classifications=ai_classifications,
-    )
-
-    _log(f"Computed **{len(results)}** metric results")
-    if results:
-        from collections import Counter
-        sev_counts = Counter(r.severity.value for r in results)
-        _log(
-            f"  Severities: "
-            + ", ".join(
-                f"{s}={c}" for s, c in sev_counts.items()
-            )
+        results = run_all_metrics(
+            metric_ids=metric_ids,
+            store=store,
+            brand_name=st.session_state.get("brand_name", ""),
+            ai_classifications=ai_classifications,
         )
-    else:
-        _log("**WARNING: No metric results produced!**")
 
-    # Phase 4: Build audit result
+        _log(f"Computed **{len(results)}** metric results")
+        if results:
+            from collections import Counter
+            sev = Counter(r.severity.value for r in results)
+            _log(
+                "  Severities: "
+                + ", ".join(f"{s}={c}" for s, c in sev.items())
+            )
+        else:
+            _log("**WARNING: No metric results produced!**")
+    except Exception as e:
+        msg = f"Phase 3 FAILED: {e}"
+        _log(f"**ERROR** — {msg}")
+        errors.append(msg)
+        logger.exception(msg)
+
+    # ----------------------------------------------------------
+    # Phase 4: Build audit result — saved IMMEDIATELY
+    # ----------------------------------------------------------
     _log("**Phase 4/5:** Building audit report...")
-    status_text.text("Building audit report...")
+    status_text.text("Phase 4/5: Building audit report...")
     progress_bar.progress(0.95)
 
-    start_date, end_date = get_date_range(days)
     audit = AuditResult(
         property_url=site_url,
         start_date=start_date,
@@ -228,7 +249,6 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
         metrics_executed=metric_ids,
     )
     audit.add_results(results)
-
     st.session_state["audit_result"] = audit
 
     _log(
@@ -237,14 +257,16 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
         f"{audit.total_findings} findings"
     )
 
-    # Phase 5: Save to Supabase
+    # ----------------------------------------------------------
+    # Phase 5: Save to Supabase (optional, never blocks)
+    # ----------------------------------------------------------
     _log("**Phase 5/5:** Saving to Supabase...")
+    status_text.text("Phase 5/5: Saving to Supabase...")
     try:
         from core.supabase_client import SupabaseClient
 
         sb = SupabaseClient()
         if sb.is_configured:
-            status_text.text("Saving to Supabase...")
             run_id = sb.save_audit_run(audit)
             if run_id:
                 st.session_state[
@@ -259,16 +281,53 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
                 )
                 _log("Saved AI classifications to cache")
         else:
-            _log("Supabase not configured — skipping save")
+            _log("Supabase not configured — skipped")
     except Exception as e:
-        _log(f"Supabase save error: {e}")
+        _log(f"Supabase save error (non-fatal): {e}")
 
+    # ----------------------------------------------------------
+    # Final status
+    # ----------------------------------------------------------
     progress_bar.progress(1.0)
-    status_text.text(
-        f"Audit complete! Health Score: "
-        f"{audit.health_score}/100 "
-        f"(Grade: {audit.health_grade})"
-    )
+    if errors:
+        status_text.text(
+            f"Audit finished with {len(errors)} error(s). "
+            f"See Audit Log."
+        )
+    else:
+        status_text.text(
+            f"Audit complete! Score: "
+            f"{audit.health_score}/100 "
+            f"({audit.health_grade})"
+        )
+
+    # Show results prominently inside the result container
+    with result_container:
+        if errors:
+            for err in errors:
+                st.error(err)
+        st.success(
+            f"### Audit Complete: "
+            f"Grade **{audit.health_grade}** — "
+            f"{audit.health_score}/100\n\n"
+            f"**{audit.total_findings}** findings across "
+            f"**{len(metric_ids)}** metrics"
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            st.page_link(
+                "pages/3_Dashboard.py",
+                label="View Dashboard",
+                icon="📊",
+                use_container_width=True,
+            )
+        with c2:
+            st.page_link(
+                "pages/4_Metrics_Explorer.py",
+                label="Explore Metrics",
+                icon="🔍",
+                use_container_width=True,
+            )
 
 
 def render():

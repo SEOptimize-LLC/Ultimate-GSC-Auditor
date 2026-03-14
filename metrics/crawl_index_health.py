@@ -44,9 +44,12 @@ class CrawlIndexHealthMetrics(BaseMetricGroup):
         return data
 
     def _get_index_status(self, result: dict) -> Optional[dict]:
-        """Safely extract indexStatusResult from an inspection result."""
-        inspection = result.get("inspectionResult", {})
-        return inspection.get("indexStatusResult")
+        """Safely extract indexStatusResult from an inspection result.
+
+        gsc_client.inspect_url() already returns the inner
+        inspectionResult dict, so we access indexStatusResult directly.
+        """
+        return result.get("indexStatusResult")
 
     def _parse_crawl_time(self, time_str: str) -> Optional[datetime]:
         """Parse an ISO datetime string from the API into a timezone-aware datetime."""

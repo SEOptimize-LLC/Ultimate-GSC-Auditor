@@ -1,4 +1,12 @@
-"""Configure page — Audit settings, URL filters, and metric scope."""
+"""Configure page — Audit settings, URL filters, and metric scope.
+
+Pipeline runs in three separate phases (via st.rerun) to stay
+within Streamlit Cloud's ~30-minute infrastructure timeout:
+
+  Phase 1 (fetch):   Fetch GSC data shapes          (~3 min)
+  Phase 2 (inspect): URL inspection batch            (~5-15 min)
+  Phase 3 (compute): AI + metrics + save to Supabase (~3 min)
+"""
 
 import logging
 
@@ -26,18 +34,22 @@ from models.data_shapes import (
 from models.audit_result import AuditResult
 from utils.date_utils import get_date_range
 
+PIPELINE_KEY = "_audit_pipeline"
+
+
+# ==============================================================
+# Config helpers
+# ==============================================================
 
 def _build_url_filter_config() -> URLFilterConfig:
     """Build URLFilterConfig from current session state."""
     config = URLFilterConfig()
 
-    # Apply category toggles
     for rule in config.exclude_rules:
         key = f"filter_cat_{rule.category}"
         if key in st.session_state:
             rule.enabled = st.session_state[key]
 
-    # Apply custom patterns
     custom_exclude = st.session_state.get("custom_exclude_text", "")
     if custom_exclude.strip():
         config.custom_exclude_patterns = [
@@ -68,7 +80,6 @@ def _get_selected_metric_ids() -> list[int]:
                 selected.extend(range(start, end + 1))
         return selected if selected else list(range(1, 101))
 
-    # By category name
     for cat_name, (start, end) in METRIC_CATEGORIES.items():
         if scope == cat_name:
             return list(range(start, end + 1))
@@ -76,97 +87,146 @@ def _get_selected_metric_ids() -> list[int]:
     return list(range(1, 101))
 
 
-def _run_audit_pipeline(metric_ids: list[int], days: int):
-    """Execute the audit pipeline: fetch -> compute -> store.
+def _get_pipeline() -> dict | None:
+    """Get the current pipeline state, or None."""
+    return st.session_state.get(PIPELINE_KEY)
 
-    Each phase is independently wrapped so a failure in one
-    phase does not prevent later phases from running. The
-    audit_result is saved to session state as early as possible
-    so even a partial run produces viewable results.
-    """
-    progress_bar = st.progress(0.0)
-    status_text = st.empty()
-    result_container = st.container()
-    debug_log = st.expander("Audit Log", expanded=True)
-    errors: list[str] = []
 
-    def _log(msg: str):
-        debug_log.write(msg)
+def _set_pipeline(phase: str, **extra) -> None:
+    """Update pipeline state and rerun."""
+    p = st.session_state.get(PIPELINE_KEY, {})
+    p["phase"] = phase
+    p.update(extra)
+    st.session_state[PIPELINE_KEY] = p
+    st.rerun()
 
-    client = st.session_state["gsc_client"]
-    site_url = st.session_state["selected_property"]
-    start_date, end_date = get_date_range(days)
 
-    # ----------------------------------------------------------
-    # Phase 1: Fetch data
-    # ----------------------------------------------------------
-    _log("**Phase 1/5:** Fetching GSC data...")
-    status_text.text("Phase 1/5: Fetching GSC data...")
+def _clear_pipeline() -> None:
+    """Remove pipeline state."""
+    st.session_state.pop(PIPELINE_KEY, None)
+
+
+# ==============================================================
+# Pipeline phases — each runs in its own Streamlit script pass
+# ==============================================================
+
+def _phase_fetch(pipeline: dict) -> None:
+    """Phase 1: Fetch GSC data shapes (no URL inspection)."""
+    metric_ids = pipeline["metric_ids"]
+    url_filter_config = pipeline["url_filter_config"]
+
+    st.subheader("Phase 1/3 — Fetching GSC Data")
+    progress = st.progress(0.0)
+    status = st.empty()
+    log = st.expander("Fetch Log", expanded=True)
+
     store = DataStore()
     st.session_state["data_store"] = store
 
-    url_filter_config = _build_url_filter_config()
-    st.session_state["url_filter_config"] = url_filter_config
+    client = st.session_state["gsc_client"]
+    site_url = st.session_state["selected_property"]
+    fetcher = DataFetcher(client=client, store=store, site_url=site_url)
+
+    required = get_required_shapes(metric_ids)
+
+    def on_progress(current, total, msg):
+        progress.progress(min(current / max(total, 1), 1.0))
+        status.text(msg)
 
     try:
-        fetcher = DataFetcher(
-            client=client, store=store, site_url=site_url,
-        )
-        required_shapes = get_required_shapes(metric_ids)
-        total_steps = len(required_shapes) + 2
-
-        def on_fetch_progress(current, total, msg):
-            pct = current / total_steps
-            progress_bar.progress(min(pct, 0.8))
-            status_text.text(f"Phase 1/5: {msg}")
-
         fetcher.fetch_for_metrics(
             metric_ids=metric_ids,
-            progress_callback=on_fetch_progress,
+            progress_callback=on_progress,
             url_filter=url_filter_config,
+            skip_url_inspection=True,
         )
-
-        shapes_fetched = store.fetched_shapes
-        _log(
-            f"Fetched **{len(shapes_fetched)}** shapes. "
-            f"Memory: {store.memory_usage_mb:.1f} MB"
-        )
-        for shape_name in shapes_fetched:
-            df = store.get_df(shape_name)
-            if hasattr(df, "__len__"):
-                _log(f"  - `{shape_name}`: {len(df):,} rows")
     except Exception as e:
-        msg = f"Phase 1 FAILED: {e}"
-        _log(f"**ERROR** — {msg}")
-        errors.append(msg)
-        logger.exception(msg)
+        log.write(f"**ERROR:** {e}")
+        logger.exception("Phase 1 fetch failed")
+        pipeline.setdefault("errors", []).append(f"Fetch: {e}")
 
-    # ----------------------------------------------------------
-    # Phase 2: AI pre-processing
-    # ----------------------------------------------------------
-    _log("**Phase 2/5:** AI pre-processing...")
-    status_text.text("Phase 2/5: AI pre-processing...")
-    progress_bar.progress(0.82)
-    ai_classifications = st.session_state.get(
-        "ai_classifications", {}
-    )
+    shapes = store.fetched_shapes
+    log.write(f"Fetched **{len(shapes)}** shapes ({store.memory_usage_mb:.1f} MB)")
+    for s in shapes:
+        df = store.get_df(s)
+        if hasattr(df, "__len__"):
+            log.write(f"  - `{s}`: {len(df):,} rows")
+
+    progress.progress(1.0)
+    status.text("Phase 1 complete — advancing to URL inspection...")
+
+    _set_pipeline("inspect")
+
+
+def _phase_inspect(pipeline: dict) -> None:
+    """Phase 2: URL inspection (the slow part, gets its own phase)."""
+    metric_ids = pipeline["metric_ids"]
+    url_filter_config = pipeline["url_filter_config"]
+
+    # Skip if no metrics need URL inspection
+    if not needs_url_inspection(metric_ids):
+        st.info("No metrics require URL inspection — skipping.")
+        _set_pipeline("compute")
+        return
+
+    st.subheader("Phase 2/3 — Inspecting URLs")
+    progress = st.progress(0.0)
+    status = st.empty()
+
+    store = DataStore()  # accesses existing session state store
+    client = st.session_state["gsc_client"]
+    site_url = st.session_state["selected_property"]
+    fetcher = DataFetcher(client=client, store=store, site_url=site_url)
+
+    def on_url_progress(current, total, msg):
+        progress.progress(min(current / max(total, 1), 1.0))
+        status.text(f"Phase 2/3: {msg}")
+
+    try:
+        fetcher.fetch_url_inspections(
+            url_filter=url_filter_config,
+            progress_callback=on_url_progress,
+        )
+    except Exception as e:
+        status.text(f"URL inspection error: {e}")
+        logger.exception("Phase 2 inspection failed")
+        pipeline.setdefault("errors", []).append(f"Inspect: {e}")
+
+    progress.progress(1.0)
+    status.text("Phase 2 complete — advancing to metric computation...")
+
+    _set_pipeline("compute")
+
+
+def _phase_compute(pipeline: dict) -> None:
+    """Phase 3: AI pre-processing + metric computation + Supabase save."""
+    metric_ids = pipeline["metric_ids"]
+    days = pipeline["days"]
+    errors = pipeline.get("errors", [])
+
+    st.subheader("Phase 3/3 — Computing Metrics")
+    progress = st.progress(0.0)
+    status = st.empty()
+    log = st.expander("Computation Log", expanded=True)
+
+    store = DataStore()
+    client = st.session_state["gsc_client"]
+    site_url = st.session_state["selected_property"]
+
+    # --- AI pre-processing ---
+    status.text("Loading AI classifications...")
+    progress.progress(0.1)
+    ai_classifications = st.session_state.get("ai_classifications", {})
 
     try:
         if not ai_classifications:
             from core.supabase_client import SupabaseClient
             sb = SupabaseClient()
             if sb.is_configured:
-                ai_classifications = (
-                    sb.get_cached_classifications(site_url)
-                )
+                ai_classifications = sb.get_cached_classifications(site_url)
                 if ai_classifications:
-                    st.session_state[
-                        "ai_classifications"
-                    ] = ai_classifications
-                    _log(
-                        f"Loaded {len(ai_classifications)} "
-                        f"cached classifications"
-                    )
+                    st.session_state["ai_classifications"] = ai_classifications
+                    log.write(f"Loaded {len(ai_classifications)} cached classifications")
 
         ai_enabled = st.session_state.get("ai_enabled", True)
         if ai_enabled:
@@ -175,38 +235,27 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
 
             or_client = OpenRouterClient()
             if or_client.is_configured:
+                status.text("Running AI classifications...")
+                progress.progress(0.2)
                 preprocessor = AIPreprocessor(
                     client=or_client,
-                    brand_name=st.session_state.get(
-                        "brand_name", ""
-                    ),
+                    brand_name=st.session_state.get("brand_name", ""),
                     cache=ai_classifications,
                 )
-                ai_classifications = preprocessor.process(
-                    store=store,
-                )
-                st.session_state[
-                    "ai_classifications"
-                ] = ai_classifications
-                _log(
-                    f"AI classified "
-                    f"{len(ai_classifications)} queries"
-                )
+                ai_classifications = preprocessor.process(store=store)
+                st.session_state["ai_classifications"] = ai_classifications
+                log.write(f"AI classified {len(ai_classifications)} queries")
             else:
-                _log("OpenRouter not configured — skipped")
+                log.write("OpenRouter not configured — AI skipped")
         else:
-            _log("AI disabled by user")
+            log.write("AI disabled by user")
     except Exception as e:
-        msg = f"Phase 2 error (non-fatal): {e}"
-        _log(msg)
-        logger.warning(msg)
+        log.write(f"AI error (non-fatal): {e}")
+        logger.warning(f"AI preprocessing: {e}")
 
-    # ----------------------------------------------------------
-    # Phase 3: Compute metrics
-    # ----------------------------------------------------------
-    _log("**Phase 3/5:** Computing metrics...")
-    status_text.text("Phase 3/5: Computing metrics...")
-    progress_bar.progress(0.88)
+    # --- Compute metrics ---
+    status.text("Computing 100 metrics...")
+    progress.progress(0.5)
     results = []
 
     try:
@@ -218,30 +267,24 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
             brand_name=st.session_state.get("brand_name", ""),
             ai_classifications=ai_classifications,
         )
-
-        _log(f"Computed **{len(results)}** metric results")
+        log.write(f"Computed **{len(results)}** metric results")
         if results:
             from collections import Counter
             sev = Counter(r.severity.value for r in results)
-            _log(
-                "  Severities: "
-                + ", ".join(f"{s}={c}" for s, c in sev.items())
-            )
+            log.write("  " + ", ".join(f"{s}={c}" for s, c in sev.items()))
         else:
-            _log("**WARNING: No metric results produced!**")
+            log.write("**WARNING: No metric results produced!**")
     except Exception as e:
-        msg = f"Phase 3 FAILED: {e}"
-        _log(f"**ERROR** — {msg}")
+        msg = f"Metric computation FAILED: {e}"
+        log.write(f"**ERROR** — {msg}")
         errors.append(msg)
         logger.exception(msg)
 
-    # ----------------------------------------------------------
-    # Phase 4: Build audit result — saved IMMEDIATELY
-    # ----------------------------------------------------------
-    _log("**Phase 4/5:** Building audit report...")
-    status_text.text("Phase 4/5: Building audit report...")
-    progress_bar.progress(0.95)
+    # --- Build audit result ---
+    status.text("Building audit report...")
+    progress.progress(0.85)
 
+    start_date, end_date = get_date_range(days)
     audit = AuditResult(
         property_url=site_url,
         start_date=start_date,
@@ -251,67 +294,99 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
     audit.add_results(results)
     st.session_state["audit_result"] = audit
 
-    _log(
+    log.write(
         f"Health Score: **{audit.health_score}/100** "
         f"(Grade: **{audit.health_grade}**) — "
         f"{audit.total_findings} findings"
     )
 
-    # ----------------------------------------------------------
-    # Phase 5: Save to Supabase (optional, never blocks)
-    # ----------------------------------------------------------
-    _log("**Phase 5/5:** Saving to Supabase...")
-    status_text.text("Phase 5/5: Saving to Supabase...")
+    # --- Save to Supabase ---
+    status.text("Saving to Supabase...")
+    progress.progress(0.95)
     try:
         from core.supabase_client import SupabaseClient
-
         sb = SupabaseClient()
         if sb.is_configured:
             run_id = sb.save_audit_run(audit)
             if run_id:
-                st.session_state[
-                    "current_audit_run_id"
-                ] = run_id
-                _log(f"Saved audit run: `{run_id}`")
-            else:
-                _log("Supabase save returned no run ID")
+                st.session_state["current_audit_run_id"] = run_id
+                log.write(f"Saved audit run: `{run_id}`")
             if ai_classifications:
-                sb.save_classifications(
-                    site_url, ai_classifications
-                )
-                _log("Saved AI classifications to cache")
+                sb.save_classifications(site_url, ai_classifications)
+                log.write("Saved AI classifications")
         else:
-            _log("Supabase not configured — skipped")
+            log.write("Supabase not configured — skipped")
     except Exception as e:
-        _log(f"Supabase save error (non-fatal): {e}")
+        log.write(f"Supabase save error: {e}")
 
-    # ----------------------------------------------------------
-    # Final status
-    # ----------------------------------------------------------
-    progress_bar.progress(1.0)
-    if errors:
-        status_text.text(
-            f"Audit finished with {len(errors)} error(s). "
-            f"See Audit Log."
-        )
+    progress.progress(1.0)
+    status.text(
+        f"Done! Score: {audit.health_score}/100 ({audit.health_grade})"
+    )
+
+    # Clear pipeline state and rerun to show results at top
+    _clear_pipeline()
+    st.rerun()
+
+
+# ==============================================================
+# Phase router
+# ==============================================================
+
+def _run_current_phase() -> bool:
+    """Run the current pipeline phase. Returns True if a phase ran."""
+    pipeline = _get_pipeline()
+    if not pipeline:
+        return False
+
+    phase = pipeline.get("phase")
+    st.info(
+        f"Audit in progress for: **{st.session_state.get('selected_property', '?')}**"
+    )
+
+    if st.button("Cancel Audit", type="secondary"):
+        _clear_pipeline()
+        st.rerun()
+
+    if phase == "fetch":
+        _phase_fetch(pipeline)
+    elif phase == "inspect":
+        _phase_inspect(pipeline)
+    elif phase == "compute":
+        _phase_compute(pipeline)
     else:
-        status_text.text(
-            f"Audit complete! Score: "
-            f"{audit.health_score}/100 "
-            f"({audit.health_grade})"
-        )
+        _clear_pipeline()
+        st.rerun()
 
-    # Show results prominently inside the result container
-    with result_container:
-        if errors:
-            for err in errors:
-                st.error(err)
+    return True
+
+
+# ==============================================================
+# Main page
+# ==============================================================
+
+def render():
+    st.header("Configure Audit")
+
+    if not st.session_state.get("authenticated"):
+        st.warning("Please connect to Google Search Console first.")
+        st.page_link("pages/1_Connect.py", label="Go to Connect page", icon="🔌")
+        return
+
+    if not st.session_state.get("selected_property"):
+        st.warning("Please select a GSC property first.")
+        st.page_link("pages/1_Connect.py", label="Go to Connect page", icon="🔌")
+        return
+
+    # ----- RESULTS AT THE TOP (always visible) -----
+    audit = st.session_state.get("audit_result")
+    if audit:
         st.success(
-            f"### Audit Complete: "
-            f"Grade **{audit.health_grade}** — "
+            f"### Grade: **{audit.health_grade}** — "
             f"{audit.health_score}/100\n\n"
             f"**{audit.total_findings}** findings across "
-            f"**{len(metric_ids)}** metrics"
+            f"**{len(audit.metrics_executed)}** metrics  |  "
+            f"{audit.start_date} to {audit.end_date}"
         )
         c1, c2 = st.columns(2)
         with c1:
@@ -328,22 +403,14 @@ def _run_audit_pipeline(metric_ids: list[int], days: int):
                 icon="🔍",
                 use_container_width=True,
             )
+        st.markdown("---")
 
+    # ----- PIPELINE IN PROGRESS -----
+    if _run_current_phase():
+        return  # Phase is running, don't show config UI
 
-def render():
-    st.header("Configure Audit")
-
-    if not st.session_state.get("authenticated"):
-        st.warning("Please connect to Google Search Console first.")
-        st.page_link("pages/1_Connect.py", label="Go to Connect page", icon="🔌")
-        return
-
-    if not st.session_state.get("selected_property"):
-        st.warning("Please select a GSC property first.")
-        st.page_link("pages/1_Connect.py", label="Go to Connect page", icon="🔌")
-        return
-
-    st.info(f"Configuring audit for: **{st.session_state['selected_property']}**")
+    # ----- NORMAL CONFIG UI -----
+    st.info(f"Property: **{st.session_state['selected_property']}**")
 
     # --- Date Range ---
     st.subheader("Date Range")
@@ -367,7 +434,6 @@ def render():
         "Homepage is always included."
     )
 
-    # Category toggles
     col1, col2 = st.columns(2)
     exclude_categories = {}
     for rule in DEFAULT_EXCLUDE_RULES:
@@ -396,7 +462,6 @@ def render():
                 key=f"filter_cat_{cat}",
             )
 
-    # Custom patterns
     with st.expander("Custom Patterns"):
         st.text_area(
             "Additional exclude patterns (one per line):",
@@ -456,7 +521,6 @@ def render():
     # --- Audit Summary ---
     required_shapes = get_required_shapes(metric_ids)
     needs_insp = needs_url_inspection(metric_ids)
-    needs_sm = needs_sitemaps(metric_ids)
     needs_ai = needs_ai_preprocessing(metric_ids)
 
     with st.expander("Audit Summary", expanded=True):
@@ -469,40 +533,21 @@ def render():
     # --- Run Button ---
     st.markdown("---")
 
-    # Always reset audit_running when the page loads —
-    # Streamlit scripts are synchronous per page, so if we're
-    # here rendering the page, no audit is currently running.
-    st.session_state["audit_running"] = False
-
     if st.button(
         "Run Audit",
         type="primary",
         use_container_width=True,
     ):
-        try:
-            _run_audit_pipeline(metric_ids, days)
-        except Exception as e:
-            st.error(f"Audit failed: {e}")
-            logger.exception("Audit pipeline error")
-
-    # Show result summary if audit exists
-    audit = st.session_state.get("audit_result")
-    if audit:
-        st.success(
-            f"Audit complete! Grade: **{audit.health_grade}** "
-            f"({audit.health_score}/100) — "
-            f"{audit.total_findings} findings"
-        )
-        st.page_link(
-            "pages/3_Dashboard.py",
-            label="View Dashboard",
-            icon="📊",
-        )
-        st.page_link(
-            "pages/4_Metrics_Explorer.py",
-            label="Explore Metrics",
-            icon="🔍",
-        )
+        url_filter_config = _build_url_filter_config()
+        st.session_state["url_filter_config"] = url_filter_config
+        st.session_state[PIPELINE_KEY] = {
+            "phase": "fetch",
+            "metric_ids": metric_ids,
+            "days": days,
+            "url_filter_config": url_filter_config,
+            "errors": [],
+        }
+        st.rerun()
 
 
 render()

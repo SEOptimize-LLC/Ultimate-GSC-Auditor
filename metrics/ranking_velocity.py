@@ -71,7 +71,7 @@ class RankingVelocityMetrics(BaseMetricGroup):
 
         slopes = (
             df_valid.groupby(["query", "page"])
-            .apply(compute_slope, include_groups=False)
+            .apply(compute_slope)
             .reset_index()
         )
 

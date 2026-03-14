@@ -44,6 +44,7 @@ class DataFetcher:
         metric_ids: list[int],
         progress_callback=None,
         url_filter=None,
+        skip_url_inspection: bool = False,
     ) -> None:
         """Fetch all data shapes required by the given metric IDs.
 
@@ -51,6 +52,7 @@ class DataFetcher:
             metric_ids: List of metric IDs (1-100) to fetch data for.
             progress_callback: Optional callable(current, total, message).
             url_filter: Optional URLFilterConfig to filter page-level data.
+            skip_url_inspection: If True, skip URL inspection (run separately).
         """
         required = get_required_shapes(metric_ids)
         shapes_to_fetch = [
@@ -59,7 +61,8 @@ class DataFetcher:
         ]
 
         needs_inspection = (
-            needs_url_inspection(metric_ids)
+            not skip_url_inspection
+            and needs_url_inspection(metric_ids)
             and not self.store.has("url_inspection")
         )
         needs_sitemap = (
@@ -126,7 +129,7 @@ class DataFetcher:
 
         # Fetch URL inspections
         if needs_inspection:
-            self._fetch_url_inspections(
+            self.fetch_url_inspections(
                 url_filter=url_filter,
                 progress_callback=progress_callback,
             )
@@ -158,7 +161,7 @@ class DataFetcher:
             logger.error(f"Failed to fetch sitemaps: {e}")
             self.store.set("sitemaps", [])
 
-    def _fetch_url_inspections(
+    def fetch_url_inspections(
         self, url_filter=None, progress_callback=None
     ) -> None:
         """Fetch URL inspection data for SEO-relevant URLs.

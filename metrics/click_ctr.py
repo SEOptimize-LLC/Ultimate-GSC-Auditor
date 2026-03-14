@@ -892,7 +892,6 @@ class ClickCTRMetrics(BaseMetricGroup):
                     "query_count": len(g),
                     "total_impressions": g["impressions"].sum(),
                 }),
-                include_groups=False,
             )
             .reset_index()
         )

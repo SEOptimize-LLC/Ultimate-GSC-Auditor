@@ -89,198 +89,271 @@ def _run_audit(
     """Run the complete audit pipeline with live st.status() feedback.
 
     Runs synchronously inside the button callback so the user sees
-    real-time progress updates (st.status + st.progress update live
-    during a single script execution).
+    real-time progress updates. Shows results directly after completion
+    (no st.rerun — results persist in session state for future views).
     """
+    import traceback
+
     site_url = st.session_state["selected_property"]
     client = st.session_state["gsc_client"]
+    audit = None
 
     progress_bar = st.progress(0.0, text="Starting audit...")
 
-    with st.status("Running audit...", expanded=True) as status:
+    try:
+        with st.status("Running audit...", expanded=True) as status:
 
-        # ---- Step 1: Fetch GSC Data Shapes ----
-        st.write("**Step 1/4 — Fetching GSC data shapes...**")
+            # ---- Step 1: Fetch GSC Data Shapes ----
+            st.write("**Step 1/4 — Fetching GSC data shapes...**")
 
-        store = DataStore()
-        st.session_state["data_store"] = store
-        fetcher = DataFetcher(client=client, store=store, site_url=site_url)
-
-        def on_fetch_progress(current, total, msg):
-            pct = current / max(total, 1) * 0.4
-            progress_bar.progress(min(pct, 0.4), text=f"Step 1: {msg}")
-            st.write(f"  {msg}")
-
-        try:
-            fetcher.fetch_for_metrics(
-                metric_ids=metric_ids,
-                progress_callback=on_fetch_progress,
-                url_filter=url_filter_config,
-                skip_url_inspection=True,
+            store = DataStore()
+            st.session_state["data_store"] = store
+            fetcher = DataFetcher(
+                client=client, store=store, site_url=site_url
             )
-            shapes = store.fetched_shapes
-            st.write(
-                f"Fetched **{len(shapes)}** data shapes "
-                f"({store.memory_usage_mb:.1f} MB)"
-            )
-        except Exception as e:
-            st.error(f"Data fetch failed: {e}")
-            logger.exception("Data fetch failed")
-            progress_bar.progress(1.0, text="Audit failed.")
-            status.update(label="Audit failed", state="error")
-            return
 
-        # ---- Step 2: URL Inspection ----
-        if needs_url_inspection(metric_ids):
-            st.write("**Step 2/4 — Inspecting URLs...**")
-
-            def on_inspect_progress(current, total, msg):
-                pct = 0.4 + (current / max(total, 1) * 0.4)
+            def on_fetch_progress(current, total, msg):
+                pct = current / max(total, 1) * 0.4
                 progress_bar.progress(
-                    min(pct, 0.8), text=f"Step 2: {msg}"
+                    min(pct, 0.4), text=f"Step 1: {msg}"
                 )
+                st.write(f"  {msg}")
 
             try:
-                fetcher.fetch_url_inspections(
+                fetcher.fetch_for_metrics(
+                    metric_ids=metric_ids,
+                    progress_callback=on_fetch_progress,
                     url_filter=url_filter_config,
-                    progress_callback=on_inspect_progress,
+                    skip_url_inspection=True,
                 )
-                insp = store.get("url_inspection")
-                count = len(insp) if isinstance(insp, dict) else 0
-                st.write(f"Inspected **{count}** URLs")
+                shapes = store.fetched_shapes
+                st.write(
+                    f"Fetched **{len(shapes)}** data shapes "
+                    f"({store.memory_usage_mb:.1f} MB)"
+                )
             except Exception as e:
-                st.warning(f"URL inspection error (non-fatal): {e}")
-                logger.warning(f"URL inspection: {e}")
-        else:
-            st.write("**Step 2/4 — URL inspection not needed, skipping.**")
+                st.error(f"Data fetch failed: {e}")
+                logger.exception("Data fetch failed")
+                progress_bar.progress(1.0, text="Audit failed.")
+                status.update(label="Audit failed", state="error")
+                return
 
-        progress_bar.progress(0.8, text="Step 3: Computing metrics...")
+            # ---- Step 2: URL Inspection ----
+            if needs_url_inspection(metric_ids):
+                st.write("**Step 2/4 — Inspecting URLs...**")
 
-        # ---- Step 3: AI + Metric Computation ----
-        st.write("**Step 3/4 — Computing metrics...**")
-        ai_classifications = st.session_state.get("ai_classifications", {})
-
-        try:
-            if not ai_classifications:
-                from core.supabase_client import SupabaseClient
-
-                sb = SupabaseClient()
-                if sb.is_configured:
-                    ai_classifications = sb.get_cached_classifications(
-                        site_url
+                def on_inspect_progress(current, total, msg):
+                    pct = 0.4 + (current / max(total, 1) * 0.4)
+                    progress_bar.progress(
+                        min(pct, 0.8), text=f"Step 2: {msg}"
                     )
-                    if ai_classifications:
+
+                try:
+                    fetcher.fetch_url_inspections(
+                        url_filter=url_filter_config,
+                        progress_callback=on_inspect_progress,
+                    )
+                    insp = store.get("url_inspection")
+                    count = (
+                        len(insp) if isinstance(insp, dict) else 0
+                    )
+                    st.write(f"Inspected **{count}** URLs")
+                except Exception as e:
+                    st.warning(
+                        f"URL inspection error (non-fatal): {e}"
+                    )
+                    logger.warning(f"URL inspection: {e}")
+            else:
+                st.write(
+                    "**Step 2/4 — URL inspection not needed, "
+                    "skipping.**"
+                )
+
+            progress_bar.progress(
+                0.8, text="Step 3: Computing metrics..."
+            )
+
+            # ---- Step 3: AI + Metric Computation ----
+            st.write("**Step 3/4 — Computing metrics...**")
+            ai_classifications = st.session_state.get(
+                "ai_classifications", {}
+            )
+
+            try:
+                if not ai_classifications:
+                    from core.supabase_client import SupabaseClient
+
+                    sb = SupabaseClient()
+                    if sb.is_configured:
+                        ai_classifications = (
+                            sb.get_cached_classifications(site_url)
+                        )
+                        if ai_classifications:
+                            st.session_state["ai_classifications"] = (
+                                ai_classifications
+                            )
+                            st.write(
+                                f"Loaded {len(ai_classifications)} "
+                                "cached AI classifications"
+                            )
+
+                ai_enabled = st.session_state.get("ai_enabled", True)
+                if ai_enabled:
+                    from ai.openrouter_client import OpenRouterClient
+                    from ai.preprocessor import AIPreprocessor
+
+                    or_client = OpenRouterClient()
+                    if or_client.is_configured:
+                        st.write("Running AI classifications...")
+                        preprocessor = AIPreprocessor(
+                            client=or_client,
+                            brand_name=st.session_state.get(
+                                "brand_name", ""
+                            ),
+                            cache=ai_classifications,
+                        )
+                        ai_classifications = preprocessor.process(
+                            store=store
+                        )
                         st.session_state["ai_classifications"] = (
                             ai_classifications
                         )
                         st.write(
-                            f"Loaded {len(ai_classifications)} "
-                            "cached AI classifications"
+                            f"AI classified "
+                            f"{len(ai_classifications)} queries"
                         )
+                    else:
+                        st.write(
+                            "OpenRouter not configured — AI skipped"
+                        )
+                else:
+                    st.write("AI disabled by user")
+            except Exception as e:
+                st.write(f"AI error (non-fatal): {e}")
+                logger.warning(f"AI preprocessing: {e}")
 
-            ai_enabled = st.session_state.get("ai_enabled", True)
-            if ai_enabled:
-                from ai.openrouter_client import OpenRouterClient
-                from ai.preprocessor import AIPreprocessor
+            progress_bar.progress(
+                0.85, text="Step 3: Running 100 metrics..."
+            )
 
-                or_client = OpenRouterClient()
-                if or_client.is_configured:
-                    st.write("Running AI classifications...")
-                    preprocessor = AIPreprocessor(
-                        client=or_client,
-                        brand_name=st.session_state.get("brand_name", ""),
-                        cache=ai_classifications,
-                    )
-                    ai_classifications = preprocessor.process(store=store)
-                    st.session_state["ai_classifications"] = (
-                        ai_classifications
+            results = []
+            try:
+                from metrics import run_all_metrics
+
+                results = run_all_metrics(
+                    metric_ids=metric_ids,
+                    store=store,
+                    brand_name=st.session_state.get("brand_name", ""),
+                    ai_classifications=ai_classifications,
+                )
+                st.write(
+                    f"Computed **{len(results)}** metric results"
+                )
+                if results:
+                    from collections import Counter
+
+                    sev = Counter(
+                        r.severity.value for r in results
                     )
                     st.write(
-                        f"AI classified {len(ai_classifications)} queries"
+                        "Severity: "
+                        + ", ".join(
+                            f"{s}={c}" for s, c in sev.items()
+                        )
                     )
-                else:
-                    st.write("OpenRouter not configured — AI skipped")
-            else:
-                st.write("AI disabled by user")
-        except Exception as e:
-            st.write(f"AI error (non-fatal): {e}")
-            logger.warning(f"AI preprocessing: {e}")
+            except Exception as e:
+                st.error(f"Metric computation failed: {e}")
+                st.code(traceback.format_exc())
+                logger.exception("Metric computation failed")
 
-        progress_bar.progress(0.85, text="Step 3: Running 100 metrics...")
-
-        results = []
-        try:
-            from metrics import run_all_metrics
-
-            results = run_all_metrics(
-                metric_ids=metric_ids,
-                store=store,
-                brand_name=st.session_state.get("brand_name", ""),
-                ai_classifications=ai_classifications,
+            # ---- Step 4: Build + Save ----
+            progress_bar.progress(
+                0.92, text="Step 4: Saving results..."
             )
-            st.write(f"Computed **{len(results)}** metric results")
-            if results:
-                from collections import Counter
+            st.write("**Step 4/4 — Saving results...**")
 
-                sev = Counter(r.severity.value for r in results)
-                st.write(
-                    "Severity: "
-                    + ", ".join(f"{s}={c}" for s, c in sev.items())
-                )
-        except Exception as e:
-            st.error(f"Metric computation failed: {e}")
-            logger.exception("Metric computation failed")
+            start_date, end_date = get_date_range(days)
+            audit = AuditResult(
+                property_url=site_url,
+                start_date=start_date,
+                end_date=end_date,
+                metrics_executed=metric_ids,
+            )
+            audit.add_results(results)
+            st.session_state["audit_result"] = audit
 
-        # ---- Step 4: Build + Save ----
-        progress_bar.progress(0.92, text="Step 4: Saving results...")
-        st.write("**Step 4/4 — Saving results...**")
+            st.write(
+                f"Health Score: **{audit.health_score}/100** "
+                f"(Grade: **{audit.health_grade}**) — "
+                f"{audit.total_findings} findings"
+            )
 
-        start_date, end_date = get_date_range(days)
-        audit = AuditResult(
-            property_url=site_url,
-            start_date=start_date,
-            end_date=end_date,
-            metrics_executed=metric_ids,
+            # Save to Supabase
+            try:
+                from core.supabase_client import SupabaseClient
+
+                sb = SupabaseClient()
+                if sb.is_configured:
+                    run_id = sb.save_audit_run(audit)
+                    if run_id:
+                        st.session_state[
+                            "current_audit_run_id"
+                        ] = run_id
+                        st.write(f"Saved audit run: `{run_id}`")
+                    if ai_classifications:
+                        sb.save_classifications(
+                            site_url, ai_classifications
+                        )
+                        st.write("Saved AI classifications")
+                else:
+                    st.write("Supabase not configured — skipped")
+            except Exception as e:
+                st.write(f"Supabase save error: {e}")
+
+            progress_bar.progress(1.0, text="Audit complete!")
+            status.update(
+                label=(
+                    f"Audit complete! Score: "
+                    f"{audit.health_score}/100 "
+                    f"({audit.health_grade})"
+                ),
+                state="complete",
+                expanded=True,
+            )
+
+    except BaseException as e:
+        # Catch ANYTHING — show it on screen so user sees it
+        st.error(
+            f"PIPELINE CRASH: {type(e).__name__}: {e}"
         )
-        audit.add_results(results)
-        st.session_state["audit_result"] = audit
+        st.code(traceback.format_exc())
+        logger.exception("Pipeline crash")
+        return
 
-        st.write(
-            f"Health Score: **{audit.health_score}/100** "
-            f"(Grade: **{audit.health_grade}**) — "
-            f"{audit.total_findings} findings"
+    # ---- Show results directly (no st.rerun) ----
+    if audit:
+        st.success(
+            f"### Audit Complete! "
+            f"Grade: **{audit.health_grade}** — "
+            f"{audit.health_score}/100\n\n"
+            f"**{audit.total_findings}** findings across "
+            f"**{len(audit.metrics_executed)}** metrics"
         )
-
-        # Save to Supabase
-        try:
-            from core.supabase_client import SupabaseClient
-
-            sb = SupabaseClient()
-            if sb.is_configured:
-                run_id = sb.save_audit_run(audit)
-                if run_id:
-                    st.session_state["current_audit_run_id"] = run_id
-                    st.write(f"Saved audit run: `{run_id}`")
-                if ai_classifications:
-                    sb.save_classifications(site_url, ai_classifications)
-                    st.write("Saved AI classifications")
-            else:
-                st.write("Supabase not configured — skipped")
-        except Exception as e:
-            st.write(f"Supabase save error: {e}")
-
-        progress_bar.progress(1.0, text="Audit complete!")
-        status.update(
-            label=(
-                f"Audit complete! Score: {audit.health_score}/100 "
-                f"({audit.health_grade})"
-            ),
-            state="complete",
-            expanded=False,
-        )
-
-    # Rerun to show results banner at top of page
-    st.rerun()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.page_link(
+                "pages/3_Dashboard.py",
+                label="View Dashboard",
+                icon="📊",
+                use_container_width=True,
+            )
+        with c2:
+            st.page_link(
+                "pages/4_Metrics_Explorer.py",
+                label="Explore Metrics",
+                icon="🔍",
+                use_container_width=True,
+            )
 
 
 # ==============================================================
@@ -462,17 +535,9 @@ def render():
     st.markdown("---")
 
     if st.button("Run Audit", type="primary", use_container_width=True):
-        try:
-            url_filter_config = _build_url_filter_config()
-            st.session_state["url_filter_config"] = url_filter_config
-            _run_audit(metric_ids, days, url_filter_config)
-        except Exception as e:
-            # Catch any unexpected error so the user sees it
-            if "RerunException" not in type(e).__name__:
-                st.error(f"Unexpected error: {e}")
-                logger.exception("Unexpected error in audit pipeline")
-            else:
-                raise
+        url_filter_config = _build_url_filter_config()
+        st.session_state["url_filter_config"] = url_filter_config
+        _run_audit(metric_ids, days, url_filter_config)
 
 
 render()
